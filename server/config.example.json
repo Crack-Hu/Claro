@@ -1,0 +1,16 @@
+{
+  "port": 3742,
+  "verbose": false,
+  "llm": {
+    "api_type": "openai-completions",
+    "base_url": "https://api.deepseek.com",
+    "api_key": "$CLARO_API_KEY",
+    "model": "deepseek-v4-flash",
+    "temperature": 0.3,
+    "max_tokens": 4096,
+    "thinking": { "type": "disabled" },
+    "reasoning_effort": "medium",
+    "clean": {},
+    "diff": {}
+  }
+}
