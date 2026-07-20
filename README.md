@@ -36,7 +36,7 @@ You can tweak the result before hitting Enter. When you do, claro learns from yo
 Claro/
 ├── extensions/
 │   ├── claro.ts                   # pi extension
-│   └── claro-ext.json             # extension config (port & timeouts)
+│   └── config.json                # extension config (port & timeouts)
 ├── server/
 │   ├── index.mjs                  # standalone HTTP server
 │   ├── config.json                # server config (LLM, API key, port)
@@ -55,11 +55,11 @@ Claro is **frontend + backend** with fully separated configuration:
 ┌──────────────────┐     HTTP (localhost)     ┌──────────────────┐     HTTPS     ┌─────────┐
 │  pi extension     │ ◄─────────────────────► │  claro-server     │ ◄───────────► │   LLM   │
 │  extensions/      │                         │  server/          │               └─────────┘
-│  claro-ext.json   │                         │  config.json      │
+│  config.json      │                         │  config.json      │
 └──────────────────┘                         └──────────────────┘
 ```
 
-- **Frontend** (`extensions/claro.ts`) — registers `/claro` commands inside pi, spawns the server on first use. Config in `extensions/claro-ext.json`.
+- **Frontend** (`extensions/claro.ts`) — registers `/claro` commands inside pi, spawns the server on first use. Config in `extensions/config.json`.
 - **Backend** (`server/index.mjs`) — a standalone HTTP service that handles LLM calls, queueing, diff analysis, and per-project terminology dictionaries. Config in `server/config.json`.
 
 The server is agent-agnostic. Adding support for another coding agent means writing a thin extension on top of the same backend.
@@ -115,7 +115,7 @@ Contains LLM connection settings and the port the server listens on. On first ru
 
 You can also configure entirely via environment variables: `CLARO_API_KEY`, `CLARO_BASE_URL`, `CLARO_MODEL`, `CLARO_PORT`.
 
-### Extension config (`extensions/claro-ext.json`)
+### Extension config (`extensions/config.json`)
 
 Contains only extension-side settings — connection target, timeouts, and log limits. **No API keys or LLM parameters.** If the file is missing, defaults are used.
 

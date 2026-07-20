@@ -41,12 +41,12 @@ function resolveClaroHome(): string {
 
 const CLARO_HOME = resolveClaroHome();
 
-// Extension config lives alongside this file (extensions/), not in server/.
+// Extension config lives alongside this file (extensions/config.json).
 function resolveExtConfigPath(): string {
   try {
-    return join(__dirname, "claro-ext.json");
+    return join(__dirname, "config.json");
   } catch {
-    return join(CLARO_HOME, "claro-ext.json");
+    return join(CLARO_HOME, "config.json");
   }
 }
 

@@ -36,7 +36,7 @@ Claro 处理后，直接把可发送的版本放在编辑器里：
 Claro/
 ├── extensions/
 │   ├── claro.ts                   # pi 扩展
-│   └── claro-ext.json             # 扩展配置（端口、超时等）
+│   └── config.json                # 扩展配置（端口、超时等）
 ├── server/
 │   ├── index.mjs                  # 独立 HTTP 服务
 │   ├── config.json                # 服务端配置（LLM、API 密钥、端口）
@@ -55,11 +55,11 @@ Claro 采用**前后端分离**设计，配置完全隔离：
 ┌──────────────────┐     HTTP (localhost)     ┌──────────────────┐     HTTPS     ┌─────────┐
 │  pi 扩展          │ ◄─────────────────────► │  claro-server     │ ◄───────────► │   LLM   │
 │  extensions/      │                         │  server/          │               └─────────┘
-│  claro-ext.json   │                         │  config.json      │
+│  config.json      │                         │  config.json      │
 └──────────────────┘                         └──────────────────┘
 ```
 
-- **前端** (`extensions/claro.ts`) — 在 pi 中注册 `/claro` 系列命令，首次使用时自动启动后端服务。配置在 `extensions/claro-ext.json`。
+- **前端** (`extensions/claro.ts`) — 在 pi 中注册 `/claro` 系列命令，首次使用时自动启动后端服务。配置在 `extensions/config.json`。
 - **后端** (`server/index.mjs`) — 独立的 HTTP 服务，处理 LLM 调用、请求排队、差异分析和项目级术语词典。配置在 `server/config.json`。
 
 后端与具体 agent 无关。要为其他 agent 添加支持，只需基于同一后端编写一个薄扩展即可。
@@ -115,7 +115,7 @@ Claro 有**两个独立的配置文件**——扩展配置和服务端配置。�
 
 也可以通过环境变量配置：`CLARO_API_KEY`、`CLARO_BASE_URL`、`CLARO_MODEL`、`CLARO_PORT`。
 
-### 扩展配置 (`extensions/claro-ext.json`)
+### 扩展配置 (`extensions/config.json`)
 
 仅包含扩展侧设置——连接目标、超时时间和日志限制。**不含任何 API 密钥或 LLM 参数。** 如果文件缺失，将使用默认值。
 

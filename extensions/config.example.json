@@ -1,0 +1,11 @@
+{
+  "port": 3742,
+  "request_timeout_ms": 60000,
+  "health_check_timeout_ms": 2000,
+  "server_ready_timeout_ms": 10000,
+  "server_ready_poll_ms": 500,
+  "queue_poll_ms": 1000,
+  "queue_timeout_ms": 120000,
+  "shutdown_timeout_ms": 5000,
+  "log_max_lines": 500
+}
