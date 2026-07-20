@@ -67,47 +67,56 @@ const DEFAULT_LLM = {
 async function loadConfig() {
   const examplePath = join(SERVER_HOME, "config.example.json");
 
-  // Try to read config.json
+  // Try to read and parse config.json
+  let raw;
   try {
-    await readFile(CONFIG_PATH, "utf8");
+    raw = await readFile(CONFIG_PATH, "utf8");
   } catch {
-    // Config missing — try to create from example
+    // File not found — try to create from example
     try {
       await copyFile(examplePath, CONFIG_PATH);
       console.log(`[claro] Created config.json from config.example.json`);
       console.log(`[claro] Please edit ${CONFIG_PATH} to set your API key and other options.`);
+      raw = await readFile(CONFIG_PATH, "utf8");
     } catch (copyErr) {
       console.error(`[claro] Cannot create config.json: ${copyErr.message}`);
       console.error(`[claro] Copy ${examplePath} to ${CONFIG_PATH} manually.`);
+      // Fall through — raw is undefined, will try env vars below
     }
   }
 
-  // Read and parse config.json
-  try {
-    const raw = await readFile(CONFIG_PATH, "utf8");
-    const userConfig = JSON.parse(raw);
-    const llm = { ...DEFAULT_LLM, ...(userConfig.llm || {}) };
-    llm.api_key = resolveApiKey(llm.api_key);
-    return {
-      port: userConfig.port || DEFAULT_CONFIG.port,
-      verbose: userConfig.verbose ?? DEFAULT_CONFIG.verbose,
-      llm,
-    };
-  } catch (readErr) {
-    // config.json still missing — use env vars only if API key is available
-    const apiKey = process.env.CLARO_API_KEY;
-    if (!apiKey) {
-      console.error(`[claro] No config.json and no CLARO_API_KEY env var.`);
-      console.error(`[claro] Copy ${examplePath} to ${CONFIG_PATH} and set your API key.`);
+  // Parse config.json
+  if (raw !== undefined) {
+    try {
+      const userConfig = JSON.parse(raw);
+      const llm = { ...DEFAULT_LLM, ...(userConfig.llm || {}) };
+      llm.api_key = resolveApiKey(llm.api_key);
+      return {
+        port: userConfig.port || DEFAULT_CONFIG.port,
+        verbose: userConfig.verbose ?? DEFAULT_CONFIG.verbose,
+        llm,
+      };
+    } catch (parseErr) {
+      console.error(`[claro] ERROR: Invalid JSON in ${CONFIG_PATH}`);
+      console.error(`[claro] ${parseErr.message}`);
+      console.error(`[claro] Fix the syntax error or delete the file to regenerate from example.`);
       return null;
     }
-    console.warn(`[claro] Running without config.json — using CLARO_API_KEY env var with defaults.`);
-    console.warn(`[claro] Create ${CONFIG_PATH} to configure model, thinking, etc.`);
-    return {
-      ...DEFAULT_CONFIG,
-      llm: { ...DEFAULT_LLM, api_key: apiKey },
-    };
   }
+
+  // No config.json — try env vars
+  const apiKey = process.env.CLARO_API_KEY;
+  if (!apiKey) {
+    console.error(`[claro] No config.json and no CLARO_API_KEY env var.`);
+    console.error(`[claro] Copy ${examplePath} to ${CONFIG_PATH} and set your API key.`);
+    return null;
+  }
+  console.warn(`[claro] Running without config.json — using CLARO_API_KEY env var with defaults.`);
+  console.warn(`[claro] Create ${CONFIG_PATH} to configure model, thinking, etc.`);
+  return {
+    ...DEFAULT_CONFIG,
+    llm: { ...DEFAULT_LLM, api_key: apiKey },
+  };
 }
 
 // ---------------------------------------------------------------------------
