@@ -67,19 +67,22 @@ const DEFAULT_LLM = {
 async function loadConfig() {
   const examplePath = join(SERVER_HOME, "config.example.json");
 
-  // If config.json doesn't exist, try copying from example
+  // Try to read config.json
   try {
     await readFile(CONFIG_PATH, "utf8");
   } catch {
+    // Config missing — try to create from example
     try {
       await copyFile(examplePath, CONFIG_PATH);
       console.log(`[claro] Created config.json from config.example.json`);
-      console.log(`[claro] Please edit ${CONFIG_PATH} to set your API key.`);
-    } catch {
-      console.warn(`[claro] No config at ${CONFIG_PATH} and no example at ${examplePath}, using env/defaults.`);
+      console.log(`[claro] Please edit ${CONFIG_PATH} to set your API key and other options.`);
+    } catch (copyErr) {
+      console.error(`[claro] Cannot create config.json: ${copyErr.message}`);
+      console.error(`[claro] Copy ${examplePath} to ${CONFIG_PATH} manually.`);
     }
   }
 
+  // Read and parse config.json
   try {
     const raw = await readFile(CONFIG_PATH, "utf8");
     const userConfig = JSON.parse(raw);
@@ -90,11 +93,19 @@ async function loadConfig() {
       verbose: userConfig.verbose ?? DEFAULT_CONFIG.verbose,
       llm,
     };
-  } catch {
-    console.warn(`[claro] No config at ${CONFIG_PATH}, using env/defaults.`);
+  } catch (readErr) {
+    // config.json still missing — use env vars only if API key is available
+    const apiKey = process.env.CLARO_API_KEY;
+    if (!apiKey) {
+      console.error(`[claro] No config.json and no CLARO_API_KEY env var.`);
+      console.error(`[claro] Copy ${examplePath} to ${CONFIG_PATH} and set your API key.`);
+      return null;
+    }
+    console.warn(`[claro] Running without config.json — using CLARO_API_KEY env var with defaults.`);
+    console.warn(`[claro] Create ${CONFIG_PATH} to configure model, thinking, etc.`);
     return {
       ...DEFAULT_CONFIG,
-      llm: { ...DEFAULT_LLM, api_key: process.env.CLARO_API_KEY || null },
+      llm: { ...DEFAULT_LLM, api_key: apiKey },
     };
   }
 }
@@ -565,6 +576,10 @@ async function kickQueue() {
 
 async function main() {
   const config = await loadConfig();
+
+  if (!config) {
+    process.exit(1);
+  }
 
   if (!config.llm?.api_key) {
     console.error("[claro] ERROR: No API key configured.");

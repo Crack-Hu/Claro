@@ -125,7 +125,10 @@ async function ensureServerRunning(): Promise<void> {
   const child = spawn(process.execPath, ["index.mjs"], {
     cwd: CLARO_HOME,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr?.on("data", (data) => {
+    console.error(`[claro-server] ${data.toString().trim()}`);
   });
   child.unref();
   serverStarted = true;
