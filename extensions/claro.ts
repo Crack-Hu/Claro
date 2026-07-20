@@ -40,8 +40,59 @@ function resolveClaroHome(): string {
 }
 
 const CLARO_HOME = resolveClaroHome();
-const CONFIG_PATH = join(CLARO_HOME, "config.json");
-const REQUEST_TIMEOUT_MS = 60_000;
+
+// Extension config lives alongside this file (extensions/), not in server/.
+function resolveExtConfigPath(): string {
+  try {
+    return join(__dirname, "claro-ext.json");
+  } catch {
+    return join(CLARO_HOME, "claro-ext.json");
+  }
+}
+
+const EXT_CONFIG_PATH = resolveExtConfigPath();
+
+// ---------------------------------------------------------------------------
+// Extension config — completely separate from server config.json.
+// Only contains extension-side settings (no API keys, no LLM params).
+// ---------------------------------------------------------------------------
+
+interface ExtConfig {
+  port: number;
+  request_timeout_ms: number;
+  health_check_timeout_ms: number;
+  server_ready_timeout_ms: number;
+  server_ready_poll_ms: number;
+  queue_poll_ms: number;
+  queue_timeout_ms: number;
+  shutdown_timeout_ms: number;
+  log_max_lines: number;
+}
+
+const DEFAULT_EXT_CONFIG: ExtConfig = {
+  port: 3742,
+  request_timeout_ms: 60_000,
+  health_check_timeout_ms: 2_000,
+  server_ready_timeout_ms: 10_000,
+  server_ready_poll_ms: 500,
+  queue_poll_ms: 1_000,
+  queue_timeout_ms: 120_000,
+  shutdown_timeout_ms: 5_000,
+  log_max_lines: 500,
+};
+
+// Module-level config — starts as defaults, loaded from file on session_start.
+let extConfig: ExtConfig = { ...DEFAULT_EXT_CONFIG };
+
+async function loadExtConfig(): Promise<ExtConfig> {
+  try {
+    const raw = await readFile(EXT_CONFIG_PATH, "utf8");
+    const user = JSON.parse(raw);
+    return { ...DEFAULT_EXT_CONFIG, ...user };
+  } catch {
+    return { ...DEFAULT_EXT_CONFIG };
+  }
+}
 
 let SERVER_URL = "http://127.0.0.1:3742";
 let serverStarted = false;
@@ -57,8 +108,6 @@ function projectDataDir(projectRoot: string): string {
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
-
-const LOG_MAX_LINES = 500;
 
 async function claroLog(projectRoot: string, level: string, msg: string) {
   const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -76,8 +125,8 @@ async function rotateLog(projectRoot: string) {
     const logPath = join(projectDataDir(projectRoot), "claro.log");
     const content = await readFile(logPath, "utf-8");
     const lines = content.split("\n").filter((l) => l.length > 0);
-    if (lines.length > LOG_MAX_LINES) {
-      const trimmed = lines.slice(-LOG_MAX_LINES).join("\n") + "\n";
+    if (lines.length > extConfig.log_max_lines) {
+      const trimmed = lines.slice(-extConfig.log_max_lines).join("\n") + "\n";
       await writeFile(logPath, trimmed, "utf-8");
     }
   } catch {
@@ -92,7 +141,7 @@ async function rotateLog(projectRoot: string) {
 async function isServerRunning(): Promise<boolean> {
   try {
     const res = await fetch(`${SERVER_URL}/ping`, {
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(extConfig.health_check_timeout_ms),
     });
     return res.ok;
   } catch {
@@ -101,17 +150,7 @@ async function isServerRunning(): Promise<boolean> {
 }
 
 async function ensureServerRunning(): Promise<void> {
-  // Read config — port is configured in config.json, default 3742
-  let port = 3742;
-  try {
-    const raw = await readFile(CONFIG_PATH, "utf8");
-    const config = JSON.parse(raw);
-    port = config.port || 3742;
-  } catch {
-    /* use defaults */
-  }
-
-  SERVER_URL = `http://127.0.0.1:${port}`;
+  SERVER_URL = `http://127.0.0.1:${extConfig.port}`;
 
   // Already running?
   const alive = await isServerRunning();
@@ -133,15 +172,16 @@ async function ensureServerRunning(): Promise<void> {
   child.unref();
   serverStarted = true;
 
-  // Wait for server to become ready (max 10s)
-  for (let i = 0; i < 20; i++) {
-    await new Promise((r) => setTimeout(r, 500));
+  // Wait for server to become ready
+  const maxAttempts = Math.ceil(extConfig.server_ready_timeout_ms / extConfig.server_ready_poll_ms);
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, extConfig.server_ready_poll_ms));
     if (await isServerRunning()) {
       console.log(`[claro] Server ready at ${SERVER_URL}`);
       return;
     }
   }
-  console.warn("[claro] Server did not become ready within 10s.");
+  console.warn(`[claro] Server did not become ready within ${extConfig.server_ready_timeout_ms / 1000}s.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,13 +195,12 @@ let lastCleanRequest: { requestId: string; cleaned: string } | null = null;
 // ---------------------------------------------------------------------------
 
 async function pollQueue(ticket: string, ctx: any): Promise<any> {
-  const MAX_POLL_MS = 120_000;
   const startTime = Date.now();
 
   return new Promise((resolve, reject) => {
     const poll = async () => {
       try {
-        if (Date.now() - startTime > MAX_POLL_MS) {
+        if (Date.now() - startTime > extConfig.queue_timeout_ms) {
           reject(new Error("Queue timeout — request took too long"));
           return;
         }
@@ -179,7 +218,7 @@ async function pollQueue(ticket: string, ctx: any): Promise<any> {
             `⏳ 排队第 ${qData.position} 位，预计 ${sec} 秒...`,
             "info",
           );
-          setTimeout(poll, 1000);
+          setTimeout(poll, extConfig.queue_poll_ms);
         }
       } catch (err: any) {
         reject(err);
@@ -229,7 +268,7 @@ function triggerAsyncDiff(
           modified: userModified,
           project_root: projectRoot,
         }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(extConfig.request_timeout_ms),
       });
 
       if (!response.ok) {
@@ -247,6 +286,8 @@ function triggerAsyncDiff(
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
+    extConfig = await loadExtConfig();
+    SERVER_URL = `http://127.0.0.1:${extConfig.port}`;
     rotateLog(ctx.cwd);
     ensureServerRunning();
   });
@@ -276,7 +317,7 @@ export default function (pi: ExtensionAPI) {
             text,
             project_root: ctx.cwd,
           }),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(extConfig.request_timeout_ms),
         });
 
         if (!response.ok && response.status !== 202) {
@@ -392,7 +433,7 @@ export default function (pi: ExtensionAPI) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ source: "claro-extension" }),
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(extConfig.shutdown_timeout_ms),
         });
         if (response.ok) {
           ctx.ui.notify("✓ Server stopped", "success");

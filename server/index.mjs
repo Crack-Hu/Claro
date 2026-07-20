@@ -552,13 +552,15 @@ async function kickQueue() {
     ticket.result = result;
     ticket.status = "done";
     ticket.resolve(result);
+    lastCleanEnd = Date.now();
   } catch (err) {
     ticket.error = err.message;
     ticket.status = "error";
     ticket.reject(err);
+    // Don't update lastCleanEnd — the API wasn't called successfully,
+    // so no rate-limit token was consumed.
   }
 
-  lastCleanEnd = Date.now();
   processing = false;
 
   // Clean up old tickets (keep last 50)
@@ -629,6 +631,11 @@ async function main() {
             );
             lastCleanEnd = Date.now();
             sendJSON(res, result.status, result.data);
+          } catch (err) {
+            // Don't update lastCleanEnd — the API wasn't called successfully,
+            // so no rate-limit token was consumed.
+            console.error("[claro] /clean error:", err.message);
+            sendJSON(res, 500, { error: err.message });
           } finally {
             processing = false;
             kickQueue();
