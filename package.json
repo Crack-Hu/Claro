@@ -1,6 +1,6 @@
 {
   "name": "claro",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Oral text cleaning extension for pi — removes filler words, converts spoken language to polished written style via LLM",
   "author": "Crack Hu",
   "repository": {
