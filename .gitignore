@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# macOS
+.DS_Store
+
+# Server config (contains API keys)
+server/config.json
+
+# Debug log (verbose mode)
+server/llm-debug.log
+
+# Per-project runtime data (generated at runtime)
+.pi/

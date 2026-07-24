@@ -1,89 +1,104 @@
 # claro 🧹
 
-**Oral text, cleaned.** Claro takes messy spoken language — full of filler words, false starts, and broken sentences — and turns it into clean, polished written text using an LLM.
+**Speech-to-text, cleaned.** Claro takes voice-typed text — full of filler words, repetitions, and ASR errors — and turns it into clean, written prose using an LLM. It learns from your corrections, automatically fixing the same recognition mistakes next time.
 
 > 简体中文说明 → [README.zh-CN.md](./README.zh-CN.md)
 
 ## Demo
 
-Imagine you just dictated this into your phone:
+You dictated this into your phone with voice input:
 
 ```
-/claro 嗯那个我觉得吧这个方案其实可以就是说再优化一下然后就是那个性能方面可能还需要再看看
+/claro umm I think like this approach could you know be optimized a bit more and also pi-agent performance might need another look
 ```
 
-Claro hands it back, ready to send:
+Claro cleans it up. The result appears in your editor:
 
 ```
-/claro-edit 我认为这个方案可以进一步优化，性能方面还需要再评估。
+I think this approach could be optimized further, and pi-agent's performance might need another look.
 ```
 
-You can tweak the result before hitting Enter. When you do, claro learns from your edits — if you consistently replace "方案" with "架构设计", it picks up the pattern and applies it next time.
+Notice `pi-agent` was automatically corrected — you fixed that once before and claro remembered.
+
+You can edit the result further before pressing Enter. Claro silently compares your edits against its output and learns new speech recognition error patterns in the background.
 
 ## Usage
 
 | Command | What it does |
 |---------|-------------|
-| `/claro <text>` | Sends oral text to the LLM, returns a cleaned version in the editor for review |
-| `/claro-edit <text>` | Auto-generated. Edit the result, then press Enter — the final text is sent to the agent, and claro diffs your changes to learn your terminology preferences |
-| `/claro-stop` | Shuts down the local claro server |
+| `/claro <text>` | Clean oral text, place result in editor for review |
+| `/claro --mode <name> <text>` | Use a specific processing mode (requires writing a mode module) |
+| `/claro --stop` | Shutdown the local claro server |
 
-> **Currently only available as a [pi](https://pi.dev) extension.** The backend is a standalone HTTP server, so integrations with other coding agents are possible — contributions welcome.
+After processing, the result appears in your editor. Edit and press Enter. The behavior depends on the mode:
 
-## File structure
+| behavior | Description |
+|----------|-------------|
+| `review` | Text in editor. Your edits trigger automatic diff learning (default claro mode) |
+| `passthrough` | Text in editor. Press Enter to send directly, no learning |
+
+> **Currently only available as a [pi](https://pi.dev) extension.** The backend is agent-agnostic — thin frontends for other coding agents are welcome contributions.
+
+## File Structure
 
 ```
 Claro/
 ├── extensions/
-│   ├── claro.ts                   # pi extension
-│   └── config.json                # extension config (port & timeouts)
+│   ├── claro.ts                   # pi extension (thin UI bridge)
+│   └── config.json                # Extension config (port, timeouts)
 ├── server/
-│   ├── index.mjs                  # standalone HTTP server
-│   ├── config.json                # server config (LLM, API key, port)
-│   └── prompts/
-│       ├── clean.md               # cleaning prompt template
-│       └── diff.md                # diff analysis prompt template
+│   ├── index.mjs                  # HTTP server framework (endpoints, queue, config)
+│   ├── config.json                # Server config (LLM, API key, port, modes)
+│   ├── lib/
+│   │   └── dict.mjs               # Dictionary utilities (imported by modes as needed)
+│   └── modes/
+│       ├── noop/
+│       │   └── index.mjs          # Pass-through mode (for testing)
+│       └── claro/
+│           ├── index.mjs          # Oral text cleaning mode
+│           └── prompts/
+│               ├── clean.md       # Cleaning prompt
+│               └── diff.md        # Error-learning prompt
 ├── README.md
 └── README.zh-CN.md
 ```
 
 ## Architecture
 
-Claro is **frontend + backend** with fully separated configuration:
-
 ```
-┌──────────────────┐     HTTP (localhost)     ┌──────────────────┐     HTTPS     ┌─────────┐
-│  pi extension     │ ◄─────────────────────► │  claro-server     │ ◄───────────► │   LLM   │
-│  extensions/      │                         │  server/          │               └─────────┘
-│  config.json      │                         │  config.json      │
-└──────────────────┘                         └──────────────────┘
+┌───────────┐           ┌──────────┐           ┌──────────┐           ┌──────────┐
+│ extension │ ────────► │  server  │ ────────► │   mode   │ ────────► │   LLM    │
+└───────────┘           └──────────┘           └──────────┘           └──────────┘
 ```
 
-- **Frontend** (`extensions/claro.ts`) — registers `/claro` commands inside pi, spawns the server on first use. Config in `extensions/config.json`.
-- **Backend** (`server/index.mjs`) — a standalone HTTP service that handles LLM calls, queueing, diff analysis, and per-project terminology dictionaries. Config in `server/config.json`.
+- **extension** — server lifecycle, HTTP transport, queue polling, UI bridging, arg parsing
+- **server** — routing, queuing, config merge, prompt resolution
+- **mode** — pluggable processing module, implements `process()` / `finalize()`, calls LLM via `ctx.callLLM()`
 
-The server is agent-agnostic. Adding support for another coding agent means writing a thin extension on top of the same backend.
+The frontend is intentionally thin — it only bridges pi's UI. All business logic lives on the server. Each mode is an independent ES module with two lifecycle functions:
 
-## Install
+- `process(input, ctx)` — process the text (required)
+- `finalize(input, ctx)` — handle user's edits for learning (optional)
+
+## Installation
 
 ```bash
 pi install git:https://github.com/Crack-Hu/Claro
 ```
 
-This installs both the extension and the server. No separate setup needed.
+## Configuration
 
-## Configure
-
-Claro has **two separate config files** — the extension config and the server config. They live in different directories and contain different settings. This keeps sensitive data (API keys) isolated from the extension.
+Claro has **two independent config files**.
 
 ### Server config (`server/config.json`)
 
-Contains LLM connection settings and the port the server listens on. On first run, created automatically from `config.example.json`.
+LLM connection and mode definitions. Auto-created from `config.example.json` on first run.
 
 ```json
 {
   "port": 3742,
   "verbose": false,
+  "defaultMode": "claro",
   "llm": {
     "api_type": "openai-completions",
     "base_url": "https://api.deepseek.com",
@@ -91,33 +106,38 @@ Contains LLM connection settings and the port the server listens on. On first ru
     "model": "deepseek-v4-flash",
     "temperature": 0.3,
     "max_tokens": 4096,
-    "thinking": { "type": "disabled" },
-    "reasoning_effort": "medium",
-    "clean": {},
-    "diff": {}
+    "reasoning_effort": "medium"
+  },
+  "modes": {
+    "noop": { "enabled": true },
+    "claro": {
+      "enabled": true,
+      "process_llm": {
+        "thinking": { "type": "enabled" }
+      },
+      "finalize_llm": {
+        "thinking": { "type": "enabled" }
+      }
+    }
   }
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `port` | Port the server listens on (default: `3742`) |
+| `port` | Server listen port (default `3742`) |
 | `verbose` | Log full LLM request/response to `llm-debug.log` |
-| `llm.base_url` | OpenAI-compatible API endpoint |
-| `llm.api_key` | API key (supports `$ENV_VAR` syntax to read from environment) |
-| `llm.model` | Default model for all requests |
-| `llm.temperature` | Sampling temperature (0–2) |
-| `llm.max_tokens` | Max tokens in response |
-| `llm.thinking` | Enable/disable reasoning (e.g. `{"type": "enabled"}`) |
-| `llm.reasoning_effort` | Reasoning effort level: `"low"`, `"medium"`, `"high"` |
-| `llm.clean` | Overrides for `/clean` requests (model, temperature, etc.) |
-| `llm.diff` | Overrides for `/diff` requests (model, temperature, etc.) |
+| `defaultMode` | Mode used when no `--mode` is specified |
+| `llm` | Global LLM config: `base_url`, `api_key` (supports `$ENV_VAR`), `model`, etc. |
+| `modes.<name>.enabled` | Enable/disable a mode |
+| `modes.<name>.process_llm` | LLM config override for process phase |
+| `modes.<name>.finalize_llm` | LLM config override for finalize phase |
 
-You can also configure entirely via environment variables: `CLARO_API_KEY`, `CLARO_BASE_URL`, `CLARO_MODEL`, `CLARO_PORT`.
+Config merge order: **global llm ← mode.process_llm ← mode.finalize_llm** (deep merge).
 
 ### Extension config (`extensions/config.json`)
 
-Contains only extension-side settings — connection target, timeouts, and log limits. **No API keys or LLM parameters.** If the file is missing, defaults are used.
+Connection parameters only — **no API keys**.
 
 ```json
 {
@@ -128,42 +148,111 @@ Contains only extension-side settings — connection target, timeouts, and log l
   "server_ready_poll_ms": 500,
   "queue_poll_ms": 1000,
   "queue_timeout_ms": 120000,
-  "shutdown_timeout_ms": 5000,
-  "log_max_lines": 500
+  "shutdown_timeout_ms": 5000
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `port` | Port to connect to the server (**must match** server config) |
-| `request_timeout_ms` | Timeout for /clean and /diff HTTP requests |
-| `health_check_timeout_ms` | Timeout for `/ping` health checks |
-| `server_ready_timeout_ms` | How long to wait for server startup |
-| `server_ready_poll_ms` | Polling interval during server startup |
-| `queue_poll_ms` | Polling interval while waiting in queue |
-| `queue_timeout_ms` | Maximum time to wait in queue |
-| `shutdown_timeout_ms` | Timeout for `/shutdown` requests |
-| `log_max_lines` | Maximum lines per project log file |
+## How It Works
 
-> **Note:** The `port` field appears in both configs. The server config controls where the server *listens*, the extension config controls where the extension *connects*. Keep them in sync.
+1. `/claro <text>` → extension sends text to local claro-server at `/process`
+2. Server loads the mode module, calls `process()` → LLM cleans the text
+3. Result placed in the pi editor (plain text, no command prefix)
+4. You edit and press Enter → the `input` event detects the edit → calls `/finalize` silently
+5. Server calls mode's `finalize()`, compares original vs modified, learns new errors
+6. Learned mappings stored in `.pi/claro/claro-dict.json`, applied in future cleanings
 
-## How it works
+## Writing a Custom Mode
 
-1. `/claro <text>` → extension sends text to local claro-server
-2. Server calls your LLM with a cleaning prompt (customizable in `server/prompts/clean.md`)
-3. Cleaned text lands in your editor as `/claro-edit <cleaned>`
-4. You edit → press Enter → final text sent to agent
-5. Extension diffs your edits against the LLM output, learns terminology preferences
-6. Dictionary stored per-project in `.pi/claro/claro-dict.json`
+Each mode lives in `server/modes/<name>/` as an ES module. Two exports to get started:
 
-## Per-project data
+### Step 1: Create the mode directory
 
-Each project gets its own data under `.pi/claro/`:
+```bash
+mkdir -p server/modes/translate/prompts
+```
+
+### Step 2: Write `index.mjs`
+
+```js
+// server/modes/translate/index.mjs
+
+import { loadDictionary, saveDictionary } from "../../lib/dict.mjs";
+
+export const meta = {
+  name: "translate",
+  description: "Translate text to English",
+  behavior: "passthrough",   // "review" | "passthrough"
+};
+
+export async function process(input, ctx) {
+  const prompt = await ctx.loadPrompt("translate.md");  // loads from modes/translate/prompts/
+  const result = await ctx.callLLM([
+    { role: "system", content: prompt },
+    { role: "user", content: input.text },
+  ]);
+  return {
+    content: result.content.trim(),
+    tokens: result.tokens,
+    model: result.model,
+  };
+}
+
+// Optional: learn from user edits
+export async function finalize(input, ctx) {
+  // input.original — model output
+  // input.modified — user's edited version
+  // For dictionary access: const dict = await loadDictionary(ctx.projectRoot);
+  return { final_text: input.modified };
+}
+```
+
+### Step 3: (Optional) Add prompts
+
+```
+server/modes/translate/prompts/
+└── translate.md
+```
+
+`ctx.loadPrompt(name)` checks `<mode>/prompts/` first, then falls back to `server/prompts/`.
+
+### Step 4: Enable the mode
+
+In `server/config.json`:
+
+```json
+"modes": {
+  "translate": {
+    "enabled": true,
+    "process_llm": { "model": "deepseek-v4-pro" }
+  }
+}
+```
+
+### Step 5: Use it
+
+```
+/claro --mode translate 你好世界
+```
+
+### ctx API Reference
+
+| Method | Description |
+|--------|-------------|
+| `ctx.callLLM(messages, phase?)` | Call LLM with auto-merged config for current mode/phase |
+| `ctx.loadPrompt(name)` | Load a prompt file (mode-local first, global fallback) |
+| `ctx.signal` | AbortSignal, pass to `fetch()` for cancellation |
+| `ctx.sessionId` | Current session identifier |
+| `ctx.requestId` | Current request identifier |
+| `ctx.projectRoot` | pi working directory, for locating project data |
+
+## Project Data
+
+Each project maintains its own data under `.pi/claro/`:
 
 | File | Purpose |
 |------|---------|
-| `claro-dict.json` | Learned terminology mappings |
-| `claro-pending.json` | Pending diff request state |
+| `claro-dict.json` | Learned speech recognition error mappings |
+| `claro-pending.json` | Two-phase request state |
 | `claro.log` | Operation log |
 
 ## License
