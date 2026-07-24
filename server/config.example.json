@@ -1,6 +1,7 @@
 {
   "port": 3742,
   "verbose": false,
+  "defaultMode": "claro",
   "llm": {
     "api_type": "openai-completions",
     "base_url": "https://api.deepseek.com",
@@ -8,12 +9,23 @@
     "model": "deepseek-v4-flash",
     "temperature": 0.3,
     "max_tokens": 4096,
-    "reasoning_effort": "medium",
-    "clean": {
-      "thinking": { "type": "enabled" }
+    "reasoning_effort": "medium"
+  },
+  "modes": {
+    "noop": {
+      "enabled": false
     },
-    "diff": {
-      "thinking": { "type": "enabled" }
+    "claro": {
+      "enabled": true,
+      "process_llm": {
+        "thinking": { "type": "enabled" }
+      },
+      "finalize_llm": {
+        "thinking": { "type": "enabled" }
+      }
     },
+    "translate": {
+      "enabled": true
+    }
   }
 }
