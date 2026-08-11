@@ -27,6 +27,11 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import {
+  matchesKey,
+  Key,
+  truncateToWidth,
+} from "@earendil-works/pi-tui";
 
 // ---------------------------------------------------------------------------
 // Resolve server root — try multiple strategies
@@ -230,6 +235,464 @@ function parseArgs(raw: string): { mode?: string; text: string } {
 }
 
 // ---------------------------------------------------------------------------
+// Dictionary TUI types & helpers
+// ---------------------------------------------------------------------------
+
+interface DictAction {
+  type: "delete" | "edit" | "add";
+  key: string;
+  value: string;
+  oldKey?: string; // original key for edit (may differ if user changed it)
+  selectedIndex: number; // position before the action
+}
+
+async function addOrEditEntry(
+  ctx: any,
+  oldKey: string | null,
+  key: string,
+  value: string,
+): Promise<void> {
+  // If editing and the key changed, delete the old entry first
+  if (oldKey && oldKey !== key) {
+    try {
+      await fetch(
+        `${SERVER_URL}/dict?project_root=${encodeURIComponent(ctx.cwd)}&key=${encodeURIComponent(oldKey)}`,
+        { method: "DELETE", signal: AbortSignal.timeout(extConfig.request_timeout_ms) },
+      );
+    } catch { /* best-effort */ }
+  }
+
+  const resp = await fetch(`${SERVER_URL}/dict`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_root: ctx.cwd, key, value }),
+    signal: AbortSignal.timeout(extConfig.request_timeout_ms),
+  });
+
+  if (!resp.ok) {
+    const data = await resp.json();
+    throw new Error(data.error || `Server ${resp.status}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DictBrowser — TUI component for browsing / editing / deleting dict entries
+// ---------------------------------------------------------------------------
+
+type DictView = "list" | "confirmDelete" | "edit" | "add";
+
+class DictBrowser {
+  private static readonly MAX_VISIBLE = 10;
+  private view: DictView = "list";
+  private entries: Array<{ key: string; value: string }>;
+  private sorted = false;
+  private selectedIndex = 0;
+  private scrollOffset = 0;
+  private confirmFocus: "yes" | "no" = "yes";
+  private deleteTarget: { key: string; value: string } | null = null;
+
+  // Edit state
+  private editKey = "";
+  private editValue = "";
+  private editFocus: "key" | "value" = "key";
+  private editOldKey: string | null = null;
+  private editError: string | null = null;
+
+  // Render cache
+  private cachedWidth?: number;
+  private cachedLines?: string[];
+
+  private theme: any;
+  private requestRender: () => void;
+  private onAction: (action: DictAction | null) => void;
+
+  constructor(
+    entries: Array<{ key: string; value: string }>,
+    theme: any,
+    requestRender: () => void,
+    onAction: (action: DictAction | null) => void,
+    initialView?: DictView,
+    initialIndex?: number,
+  ) {
+    this.entries = entries;
+    this.theme = theme;
+    this.requestRender = requestRender;
+    this.onAction = onAction;
+    if (initialView) {
+      this.view = initialView;
+    }
+    if (initialIndex !== undefined && initialIndex < entries.length) {
+      this.selectedIndex = initialIndex;
+      // Scroll to show the selected entry
+      if (initialIndex >= DictBrowser.MAX_VISIBLE) {
+        this.scrollOffset = initialIndex - DictBrowser.MAX_VISIBLE + 1;
+      }
+    }
+  }
+
+  // ---- public interface ----
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+
+    // Compute display entries (sorted or original order)
+    const displayEntries = this.sorted
+      ? [...this.entries].sort((a, b) => a.key.localeCompare(b.key, "zh"))
+      : this.entries;
+
+    let raw: string[];
+    switch (this.view) {
+      case "list":
+        raw = this.renderList(width, displayEntries);
+        break;
+      case "confirmDelete":
+        raw = this.renderConfirm(width);
+        break;
+      case "edit":
+      case "add":
+        raw = this.renderEdit(width);
+        break;
+    }
+
+    // Wrap content in a magenta top / bottom line, with 1-char side padding
+    const MAG = "\x1b[35m";
+    const RST = "\x1b[0m";
+    const innerW = Math.max(10, width - 4);
+    const bar = MAG + "─".repeat(innerW) + RST;
+
+    const lines = [bar];
+    for (const line of raw) {
+      const truncated = truncateToWidth(line, innerW - 2); // -2 for the 1-char side padding
+      const after = truncated.replace(/\x1b\[[0-9;]*m/g, "");
+      const pad = innerW - 2 - after.length;
+      lines.push(" " + truncated + " ".repeat(Math.max(pad, 0)) + " ");
+    }
+    lines.push(bar);
+
+    // Pad lines to terminal width so the overlay fully covers
+    const padded = lines.map((l) => {
+      const plain = l.replace(/\x1b\[[0-9;]*m/g, "");
+      const need = width - plain.length;
+      return need > 0 ? l + " ".repeat(need) : l;
+    });
+
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  handleInput(data: string): void {
+    if (this.view === "list") {
+      const displayEntries = this.sorted
+        ? [...this.entries].sort((a, b) => a.key.localeCompare(b.key, "zh"))
+        : this.entries;
+      this.handleListInput(data, displayEntries);
+    } else if (this.view === "confirmDelete") {
+      this.handleConfirmInput(data);
+    } else {
+      this.handleEditInput(data);
+    }
+  }
+
+  // ---- list view ----
+
+  private renderList(width: number, displayEntries: Array<{ key: string; value: string }>): string[] {
+    const t = this.theme;
+    const lines: string[] = [];
+    const pad = " ".repeat(2);
+
+    // Title
+    const title = `Claro Dictionary (${this.entries.length} entries)` + (this.sorted ? " [sorted]" : "");
+    lines.push(pad + t.fg("accent", t.bold(title)));
+    lines.push("");
+
+    // Entries — show only a scrollable window
+    if (displayEntries.length === 0) {
+      lines.push(pad + t.fg("muted", "(empty)"));
+    } else {
+      const visibleStart = this.scrollOffset;
+      const visibleEnd = Math.min(visibleStart + DictBrowser.MAX_VISIBLE, displayEntries.length);
+      for (let i = visibleStart; i < visibleEnd; i++) {
+        const { key, value } = displayEntries[i]!;
+        const display = `${key}  →  ${value}`;
+        const isSelected = i === this.selectedIndex;
+        const prefix = isSelected ? "> " : "  ";
+        const colored = isSelected
+          ? t.bg("selectedBg", prefix + display)
+          : prefix + t.fg("text", display);
+        lines.push(truncateToWidth(colored, width - 2));
+      }
+    }
+
+    lines.push("");
+    const scrollHint = displayEntries.length > DictBrowser.MAX_VISIBLE
+      ? ` (${this.selectedIndex + 1}/${displayEntries.length})`
+      : "";
+    lines.push(
+      pad +
+        t.fg(
+          "dim",
+          `↑↓ · esc · d delete · e edit · n new · s sort${scrollHint}`,
+        ),
+    );
+
+    return lines;
+  }
+
+  private handleListInput(data: string, displayEntries: Array<{ key: string; value: string }>): void {
+    if (matchesKey(data, Key.up)) {
+      if (this.selectedIndex > 0) {
+        this.selectedIndex--;
+        if (this.selectedIndex < this.scrollOffset) {
+          this.scrollOffset = this.selectedIndex;
+        }
+        this.invalidate();
+        this.requestRender();
+      }
+    } else if (matchesKey(data, Key.down)) {
+      if (this.selectedIndex < displayEntries.length - 1) {
+        this.selectedIndex++;
+        if (this.selectedIndex >= this.scrollOffset + DictBrowser.MAX_VISIBLE) {
+          this.scrollOffset = this.selectedIndex - DictBrowser.MAX_VISIBLE + 1;
+        }
+        this.invalidate();
+        this.requestRender();
+      }
+    } else if (matchesKey(data, Key.escape)) {
+      this.onAction(null);
+    } else if (data === "d" || data === "D") {
+      if (displayEntries.length > 0 && this.selectedIndex < displayEntries.length) {
+        this.deleteTarget = displayEntries[this.selectedIndex]!;
+        this.view = "confirmDelete";
+        this.confirmFocus = "yes";
+        this.invalidate();
+        this.requestRender();
+      }
+    } else if (data === "e" || data === "E") {
+      if (displayEntries.length > 0 && this.selectedIndex < displayEntries.length) {
+        const entry = displayEntries[this.selectedIndex]!;
+        this.editOldKey = entry.key;
+        this.editKey = entry.key;
+        this.editValue = entry.value;
+        this.editFocus = "key";
+        this.editError = null;
+        this.view = "edit";
+        this.invalidate();
+        this.requestRender();
+      }
+    } else if (data === "s" || data === "S") {
+      this.sorted = !this.sorted;
+      this.selectedIndex = 0;
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.requestRender();
+    } else if (data === "n" || data === "N") {
+      this.editOldKey = null;
+      this.editKey = "";
+      this.editValue = "";
+      this.editFocus = "key";
+      this.editError = null;
+      this.view = "add";
+      this.invalidate();
+      this.requestRender();
+    }
+  }
+
+  // ---- confirm dialog ----
+
+  private renderConfirm(width: number): string[] {
+    const t = this.theme;
+    const entry = this.deleteTarget!;
+    const lines: string[] = [];
+    const pad = "  ";
+
+    lines.push(pad + t.fg("warning", t.bold("Delete Entry")));
+    lines.push("");
+    lines.push(
+      pad + `Delete "${t.fg("accent", entry.key)} → ${t.fg("accent", entry.value)}"?`,
+    );
+    lines.push("");
+
+    const yesLabel =
+      this.confirmFocus === "yes"
+        ? t.bg("selectedBg", "  Yes  ")
+        : "  Yes  ";
+    const noLabel =
+      this.confirmFocus === "no"
+        ? t.bg("selectedBg", "  No  ")
+        : "  No  ";
+    lines.push(pad + `${yesLabel}  ${noLabel}`);
+    lines.push("");
+    lines.push(
+      pad + t.fg("dim", "←→ choose · enter confirm · esc cancel"),
+    );
+
+    return lines;
+  }
+
+  private handleConfirmInput(data: string): void {
+    if (matchesKey(data, Key.escape)) {
+      this.view = "list";
+      this.invalidate();
+      this.requestRender();
+    } else if (matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
+      this.confirmFocus = this.confirmFocus === "yes" ? "no" : "yes";
+      this.invalidate();
+      this.requestRender();
+    } else if (matchesKey(data, Key.enter)) {
+      if (this.confirmFocus === "yes") {
+        const entry = this.deleteTarget!;
+        this.onAction({ type: "delete", key: entry.key, value: entry.value, selectedIndex: this.selectedIndex });
+      } else {
+        this.view = "list";
+        this.invalidate();
+        this.requestRender();
+      }
+    }
+  }
+
+  // ---- edit dialog ----
+
+  private renderEdit(width: number): string[] {
+    const t = this.theme;
+    const isAdd = this.view === "add";
+    const lines: string[] = [];
+    const pad = "  ";
+
+    const title = isAdd ? "Add Entry" : "Edit Entry";
+    lines.push(pad + t.fg("accent", t.bold(title)));
+    lines.push("");
+
+    // Key field
+    const keyLabel = "Key:  ";
+    const keyCursor = this.editFocus === "key" ? "│" : " ";
+    const keyDisplay = this.editKey;
+    const keyLine =
+      pad +
+      keyLabel +
+      (this.editFocus === "key"
+        ? t.bg("selectedBg", keyDisplay + keyCursor)
+        : keyDisplay + keyCursor);
+    lines.push(truncateToWidth(keyLine, width - 2));
+
+    // Arrow
+    lines.push(pad + "       ↓");
+
+    // Value field
+    const valLabel = "Value:";
+    const valCursor = this.editFocus === "value" ? "│" : " ";
+    const valDisplay = this.editValue;
+    const valLine =
+      pad +
+      valLabel +
+      (this.editFocus === "value"
+        ? t.bg("selectedBg", valDisplay + valCursor)
+        : valDisplay + valCursor);
+    lines.push(truncateToWidth(valLine, width - 2));
+
+    lines.push("");
+
+    // Error message
+    if (this.editError) {
+      lines.push(pad + t.fg("error", `✗ ${this.editError}`));
+      lines.push("");
+    }
+
+    lines.push(
+      pad +
+        t.fg(
+          "dim",
+          "Tab switch field · Enter save · Esc cancel",
+        ),
+    );
+
+    return lines;
+  }
+
+  private handleEditInput(data: string): void {
+    if (matchesKey(data, Key.escape)) {
+      // In "add" view, escape closes the browser (no entries to go back to)
+      if (this.view === "add") {
+        this.onAction(null);
+        return;
+      }
+      this.view = "list";
+      this.editError = null;
+      this.invalidate();
+      this.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, Key.tab) || matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+      this.editFocus = this.editFocus === "key" ? "value" : "key";
+      this.editError = null;
+      this.invalidate();
+      this.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, Key.enter)) {
+      const key = this.editKey.trim();
+      const value = this.editValue.trim();
+
+      if (!key || !value) {
+        this.editError = "Key and value cannot be empty";
+        this.invalidate();
+        this.requestRender();
+        return;
+      }
+
+      // Validate format: a -> b (key and value must be non-empty)
+      if (key === value) {
+        this.editError = "Key and value must be different";
+        this.invalidate();
+        this.requestRender();
+        return;
+      }
+
+      const isAdd = this.view === "add";
+      this.onAction({
+        type: isAdd ? "add" : "edit",
+        key,
+        value,
+        oldKey: isAdd ? undefined : (this.editOldKey ?? undefined),
+        selectedIndex: this.selectedIndex,
+      });
+      return;
+    }
+
+    if (matchesKey(data, Key.backspace) || matchesKey(data, Key.delete)) {
+      if (this.editFocus === "key" && this.editKey.length > 0) {
+        this.editKey = this.editKey.slice(0, -1);
+      } else if (this.editFocus === "value" && this.editValue.length > 0) {
+        this.editValue = this.editValue.slice(0, -1);
+      }
+      this.editError = null;
+      this.invalidate();
+      this.requestRender();
+      return;
+    }
+
+    // Printable characters (single byte, not a control sequence)
+    if (data.length === 1 && data.charCodeAt(0) >= 32) {
+      if (this.editFocus === "key") {
+        this.editKey += data;
+      } else {
+        this.editValue += data;
+      }
+      this.editError = null;
+      this.invalidate();
+      this.requestRender();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -241,20 +704,150 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -----------------------------------------------------------------------
+  // showDictBrowser — TUI dictionary browser (called by /claro --dict)
+  // -----------------------------------------------------------------------
+
+  async function showDictBrowser(ctx: any): Promise<void> {
+    const showBrowser = async (newIndex?: number): Promise<void> => {
+      // Fetch current entries
+      let entries: Array<{ key: string; value: string }> = [];
+      try {
+        const resp = await fetch(
+          `${SERVER_URL}/dict?project_root=${encodeURIComponent(ctx.cwd)}`,
+          { signal: AbortSignal.timeout(extConfig.request_timeout_ms) },
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          entries = Object.entries(data.terms as Record<string, string>).map(
+            ([k, v]) => ({ key: k, value: v }),
+          );
+        }
+      } catch {
+        ctx.ui.notify("✗ Failed to load dictionary", "error");
+        return;
+      }
+
+      if (entries.length === 0) {
+        const addNew = await ctx.ui.custom<boolean>((tui, theme, _kb, done) => {
+          const comp = new DictBrowser(
+            [],
+            theme,
+            () => { tui.requestRender(); },
+            (action) => {
+              if (!action) {
+                done(false);
+              } else if (action.type === "add") {
+                addOrEditEntry(ctx, null, action.key, action.value)
+                  .then(() => done(true))
+                  .catch((err: any) => {
+                    ctx.ui.notify(`✗ Failed: ${err.message}`, "error");
+                    done(false);
+                  });
+              } else {
+                done(false);
+              }
+            },
+            "add",
+          );
+          return {
+            render: (w) => comp.render(w),
+            invalidate: () => comp.invalidate(),
+            handleInput: (data) => { comp.handleInput(data); tui.requestRender(); },
+          };
+        }, { overlay: true });
+        if (addNew) {
+          ctx.ui.notify("✓ Dictionary updated", "success");
+          return showBrowser();
+        }
+        return;
+      }
+
+      const result = await ctx.ui.custom<DictAction | null>(
+        (tui, theme, _kb, done) => {
+          const comp = new DictBrowser(
+            entries,
+            theme,
+            () => { tui.requestRender(); },
+            (action) => done(action),
+            undefined,
+            newIndex,
+          );
+          return {
+            render: (w) => comp.render(w),
+            invalidate: () => comp.invalidate(),
+            handleInput: (data) => { comp.handleInput(data); tui.requestRender(); },
+          };
+        },
+        { overlay: true },
+      );
+
+      if (!result) {
+        return; // user cancelled
+      }
+
+      if (result.type === "delete") {
+        try {
+          const resp = await fetch(
+            `${SERVER_URL}/dict?project_root=${encodeURIComponent(ctx.cwd)}&key=${encodeURIComponent(result.key)}`,
+            { method: "DELETE", signal: AbortSignal.timeout(extConfig.request_timeout_ms) },
+          );
+          if (resp.ok) {
+            ctx.ui.notify(`✓ Deleted "${result.key}"`, "success");
+          } else {
+            ctx.ui.notify(`✗ Failed to delete "${result.key}"`, "error");
+          }
+        } catch {
+          ctx.ui.notify(`✗ Failed to delete "${result.key}"`, "error");
+        }
+        // After delete: auto-select next entry (or previous if last was deleted)
+        const nextIndex = result.selectedIndex < entries.length
+          ? result.selectedIndex
+          : Math.max(0, result.selectedIndex - 1);
+        return showBrowser(nextIndex);
+      }
+
+      if (result.type === "edit") {
+        await addOrEditEntry(ctx, result.oldKey ?? null, result.key, result.value);
+        ctx.ui.notify(`✓ Updated "${result.key} → ${result.value}"`, "success");
+        return showBrowser(result.selectedIndex);
+      }
+
+      if (result.type === "add") {
+        await addOrEditEntry(ctx, null, result.key, result.value);
+        ctx.ui.notify(`✓ Added "${result.key} → ${result.value}"`, "success");
+        return showBrowser();
+      }
+    };
+
+    await showBrowser();
+  }
+
+  // -----------------------------------------------------------------------
   // Command: /claro [--mode <name>] <text>  |  /claro --stop
   // -----------------------------------------------------------------------
 
   pi.registerCommand("claro", {
     description:
-      "Process text via claro-server. Usage: /claro [--mode <name>] <text> | /claro --stop",
+      "Process text via claro-server. Usage: /claro [--mode <name>] <text> | /claro --stop | /claro --dict",
     getArgumentCompletions: (prefix: string) => {
-      const flags = ["--mode ", "--stop"];
+      const flags = ["--mode ", "--stop", "--dict"];
       return flags
         .filter((f) => f.startsWith(prefix))
         .map((f) => ({ value: f, label: f }));
     },
     handler: async (args, ctx) => {
       const raw = args.trim();
+
+      // --- /claro --dict ---
+      if (raw === "--dict") {
+        try {
+          await ensureServerRunning();
+          await showDictBrowser(ctx);
+        } catch (err: any) {
+          ctx.ui.notify(`✗ dict: ${err.message}`, "error");
+        }
+        return;
+      }
 
       // --- /claro --stop ---
       if (raw === "--stop") {

@@ -8,6 +8,9 @@
  *   GET  /queue    — Poll queued request status (ticket param)
  *   GET  /ping     — Health check
  *   POST /shutdown — Graceful shutdown
+ *   GET  /dict     — List all dictionary entries
+ *   DELETE /dict   — Delete a dictionary entry (key query param)
+ *   PUT  /dict     — Add or update a dictionary entry
  *
  * Legacy (redirected internally):
  *   POST /clean    — → /process?mode=clean
@@ -25,7 +28,7 @@ import { createServer } from "node:http";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { projectDataDir } from "./lib/dict.mjs";
+import { projectDataDir, loadDictionary, saveDictionary } from "./lib/dict.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -756,6 +759,70 @@ async function main() {
       console.log("[claro] Shutting down...");
       sendJSON(res, 200, { status: "shutting_down" });
       server.close(() => { console.log("[claro] Server stopped."); process.exit(0); });
+      return;
+    }
+
+    // GET /dict?project_root=...
+    if (req.method === "GET" && url.pathname === "/dict") {
+      try {
+        const projectRoot = url.searchParams.get("project_root");
+        if (!projectRoot) { sendJSON(res, 400, { error: "Missing 'project_root'" }); return; }
+
+        const terms = await loadDictionary(projectRoot);
+        sendJSON(res, 200, { terms });
+      } catch (err) {
+        console.error(`[claro] /dict GET error:`, err.message);
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    // DELETE /dict?project_root=...&key=...
+    if (req.method === "DELETE" && url.pathname === "/dict") {
+      try {
+        const projectRoot = url.searchParams.get("project_root");
+        const key = url.searchParams.get("key");
+        if (!projectRoot) { sendJSON(res, 400, { error: "Missing 'project_root'" }); return; }
+        if (!key) { sendJSON(res, 400, { error: "Missing 'key'" }); return; }
+
+        const terms = await loadDictionary(projectRoot);
+        if (!(key in terms)) {
+          sendJSON(res, 404, { error: `Entry not found: "${key}"` });
+          return;
+        }
+        delete terms[key];
+        await saveDictionary(projectRoot, terms);
+        sendJSON(res, 200, { deleted: key });
+      } catch (err) {
+        console.error(`[claro] /dict DELETE error:`, err.message);
+        sendJSON(res, 500, { error: err.message });
+      }
+      return;
+    }
+
+    // PUT /dict  { project_root, key, value }
+    if (req.method === "PUT" && url.pathname === "/dict") {
+      try {
+        const body = await parseJSON(req);
+        const { project_root, key, value } = body;
+        if (!project_root) { sendJSON(res, 400, { error: "Missing 'project_root'" }); return; }
+        if (!key || typeof key !== "string" || key.trim().length === 0) {
+          sendJSON(res, 400, { error: "Missing or empty 'key'" });
+          return;
+        }
+        if (!value || typeof value !== "string" || value.trim().length === 0) {
+          sendJSON(res, 400, { error: "Missing or empty 'value'" });
+          return;
+        }
+
+        const terms = await loadDictionary(project_root);
+        terms[key.trim()] = value.trim();
+        await saveDictionary(project_root, terms);
+        sendJSON(res, 200, { key: key.trim(), value: value.trim() });
+      } catch (err) {
+        console.error(`[claro] /dict PUT error:`, err.message);
+        sendJSON(res, 500, { error: err.message });
+      }
       return;
     }
 

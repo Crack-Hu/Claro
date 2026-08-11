@@ -30,6 +30,19 @@ You can edit the result further before pressing Enter. Claro silently compares y
 | `/claro --mode <name> <text>` | Use a specific processing mode (requires writing a mode module) |
 | `/claro --stop` | Shutdown the local claro server |
 
+### Dictionary Browser
+
+`/claro --dict` opens an interactive TUI overlay for managing learned term mappings (`key → value`).
+
+| Key | Action |
+|-----|--------|
+| `↑` `↓` | Navigate entries (scrolls at 10+) |
+| `d` | Delete selected entry (with confirmation dialog) |
+| `e` | Edit selected entry (inline key/value editing) |
+| `n` | Add a new entry |
+| `s` | Toggle sort (alphabetical ↔ original order) |
+| `esc` | Close browser |
+
 After processing, the result appears in your editor. Edit and press Enter. The behavior depends on the mode:
 
 | behavior | Description |
