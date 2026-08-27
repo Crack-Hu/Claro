@@ -23,7 +23,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -40,12 +40,29 @@ import {
 function resolveClaroHome(): string {
   if (process.env.CLARO_HOME) return process.env.CLARO_HOME;
 
+  // Strategy 1: relative to extension file (../server)
+  // Works when running from source (git clone) or development
   try {
     const candidate = join(__dirname, "..", "server");
     if (existsSync(join(candidate, "index.mjs"))) return candidate;
   } catch { /* __dirname may not be defined */ }
 
-  return join(homedir(), ".pi", "agent", "claro");
+  // Strategy 2: check common pi installation paths
+  // When pi clones the repo, it's at: ~/.pi/agent/git/github.com/Crack-Hu/Claro/
+  try {
+    const homeDir = homedir();
+    const candidates = [
+      join(homeDir, ".pi", "agent", "git", "github.com", "Crack-Hu", "Claro", "server"),
+      join(homeDir, ".pi", "agent", "node_modules", "claro", "server"),
+      join(homeDir, ".pi", "node_modules", "claro", "server"),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(join(candidate, "index.mjs"))) return candidate;
+    }
+  } catch { /* ignore */ }
+
+  // Strategy 3: fallback to ~/.pi/agent/claro/server (user-managed)
+  return join(homedir(), ".pi", "agent", "claro", "server");
 }
 
 const CLARO_HOME = resolveClaroHome();
@@ -122,6 +139,67 @@ async function isServerRunning(): Promise<boolean> {
   }
 }
 
+/**
+ * Try to free the given port. If a claro server is running, shut it down gracefully.
+ * If the port is occupied by a stale process, force kill it.
+ */
+async function freePort(port: number): Promise<void> {
+  try {
+    const probe = await fetch(`http://127.0.0.1:${port}/ping`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    if (probe.ok) {
+      // A claro server is running — try graceful shutdown
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/shutdown`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: "claro-extension" }),
+          signal: AbortSignal.timeout(2000),
+        });
+        if (res.ok) {
+          await new Promise((r) => setTimeout(r, 500));
+          return;
+        }
+      } catch {
+        // Graceful shutdown failed, fall through to force kill
+      }
+      // Graceful shutdown didn't work — force kill
+      await forceKillByPort(port);
+    }
+  } catch {
+    // Nothing listening — port is free
+  }
+}
+
+/**
+ * Force kill all processes listening on the given port using lsof.
+ */
+async function forceKillByPort(port: number): Promise<void> {
+  try {
+    const result = execSync(
+      `lsof -ti tcp:${port} -sTCP:LISTEN 2>/dev/null`,
+      { encoding: "utf8", timeout: 3000 },
+    ).trim();
+    if (result) {
+      const pids = result.split("\n").filter(Boolean);
+      for (const pid of pids) {
+        try {
+          process.kill(parseInt(pid, 10), "SIGTERM");
+        } catch {
+          // May not have permission
+        }
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  } catch {
+    // lsof not available
+  }
+}
+
+let serverStartRetries = 0;
+const MAX_SERVER_START_RETRIES = 3;
+
 async function ensureServerRunning(): Promise<void> {
   SERVER_URL = `http://127.0.0.1:${extConfig.port}`;
 
@@ -130,12 +208,39 @@ async function ensureServerRunning(): Promise<void> {
 
   if (serverStarted) return;
 
+  // Before starting, try to free the port
+  await freePort(extConfig.port);
+
   console.log(`[claro] Starting server at ${SERVER_URL}...`);
+
+  // Pass config to the server via environment variables so they agree on port
+  const env: Record<string, string> = {
+    ...Object.fromEntries(
+      Object.entries(process.env as Record<string, string>).filter(
+        ([k]) => !k.startsWith("CLARO_"),
+      ),
+    ),
+    CLARO_HOME,
+    CLARO_PORT: String(extConfig.port),
+  };
+
   const child = spawn(process.execPath, ["index.mjs"], {
     cwd: CLARO_HOME,
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],
+    env,
   });
+
+  let childExited = false;
+  let exitCode: number | null = null;
+  let exitSignal: string | null = null;
+
+  child.on("exit", (code, signal) => {
+    childExited = true;
+    exitCode = code;
+    exitSignal = signal;
+  });
+
   child.stderr?.on("data", (data) => {
     console.error(`[claro-server] ${data.toString().trim()}`);
   });
@@ -145,12 +250,38 @@ async function ensureServerRunning(): Promise<void> {
   const maxAttempts = Math.ceil(extConfig.server_ready_timeout_ms / extConfig.server_ready_poll_ms);
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((r) => setTimeout(r, extConfig.server_ready_poll_ms));
+
+    if (childExited) {
+      // Server process exited before becoming ready
+      console.warn(
+        `[claro] Server exited with code ${exitCode}${exitSignal ? ` (signal: ${exitSignal})` : ""} ` +
+        `before becoming ready. Port ${extConfig.port} may be in use.`,
+      );
+      // Try one more time after freeing the port (with retry limit)
+      serverStarted = false;
+      serverStartRetries++;
+      if (serverStartRetries <= MAX_SERVER_START_RETRIES) {
+        await freePort(extConfig.port);
+        return ensureServerRunning();
+      } else {
+        console.error(
+          `[claro] Failed to start server after ${MAX_SERVER_START_RETRIES} retries. ` +
+          `Please check that port ${extConfig.port} is available and no other claro server is running.`,
+        );
+        return;
+      }
+    }
+
     if (await isServerRunning()) {
       console.log(`[claro] Server ready at ${SERVER_URL}`);
+      serverStartRetries = 0;
       return;
     }
   }
+
   console.warn(`[claro] Server did not become ready within ${extConfig.server_ready_timeout_ms / 1000}s.`);
+  serverStarted = false;
+  serverStartRetries = 0;
 }
 
 // ---------------------------------------------------------------------------

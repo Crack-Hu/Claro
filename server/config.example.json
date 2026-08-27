@@ -1,5 +1,5 @@
 {
-  "port": 3742,
+  "port": 3743,
   "verbose": false,
   "defaultMode": "claro",
   "llm": {

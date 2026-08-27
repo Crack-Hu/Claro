@@ -104,8 +104,13 @@ async function loadConfig() {
       }
       // ----------------------------------------------------------------
 
+      // CLARO_PORT env var overrides config file port (set by extension)
+      const port = process.env.CLARO_PORT
+        ? parseInt(process.env.CLARO_PORT, 10)
+        : (user.port || DEFAULT_CONFIG.port);
+
       return {
-        port: user.port || DEFAULT_CONFIG.port,
+        port,
         verbose: user.verbose ?? DEFAULT_CONFIG.verbose,
         defaultMode: user.defaultMode || DEFAULT_CONFIG.defaultMode,
         llm,
