@@ -47,7 +47,7 @@ const PROMPTS_DIR = join(SERVER_HOME, "prompts"); // legacy fallback
 // ---------------------------------------------------------------------------
 
 const DEFAULT_CONFIG = {
-  port: parseInt(process.env.CLARO_PORT || "3742", 10),
+  port: parseInt(process.env.CLARO_PORT || "3743", 10),
   verbose: false,
   defaultMode: "clean",
 };

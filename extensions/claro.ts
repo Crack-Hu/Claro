@@ -93,7 +93,7 @@ interface ExtConfig {
 }
 
 const DEFAULT_EXT_CONFIG: ExtConfig = {
-  port: 3742,
+  port: 3743,
   request_timeout_ms: 60_000,
   health_check_timeout_ms: 2_000,
   server_ready_timeout_ms: 10_000,
@@ -106,8 +106,19 @@ const DEFAULT_EXT_CONFIG: ExtConfig = {
 let extConfig: ExtConfig = { ...DEFAULT_EXT_CONFIG };
 
 async function loadExtConfig(): Promise<ExtConfig> {
+  // Try config.json (user overrides, gitignored)
   try {
     const raw = await readFile(EXT_CONFIG_PATH, "utf8");
+    const user = JSON.parse(raw);
+    return { ...DEFAULT_EXT_CONFIG, ...user };
+  } catch {
+    // config.json not found — try config.example.json (tracked by git)
+  }
+
+  // Fall back to config.example.json (tracked by git, contains defaults)
+  try {
+    const examplePath = EXT_CONFIG_PATH.replace(/config\.json$/, "config.example.json");
+    const raw = await readFile(examplePath, "utf8");
     const user = JSON.parse(raw);
     return { ...DEFAULT_EXT_CONFIG, ...user };
   } catch {

@@ -1,5 +1,5 @@
 {
-  "port": 3742,
+  "port": 3743,
   "request_timeout_ms": 60000,
   "health_check_timeout_ms": 2000,
   "server_ready_timeout_ms": 10000,

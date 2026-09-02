@@ -7,6 +7,9 @@ node_modules/
 # Server config (contains API keys)
 server/config.json
 
+# Extension config (local overrides)
+extensions/config.json
+
 # Debug log (verbose mode)
 server/llm-debug.log
 
