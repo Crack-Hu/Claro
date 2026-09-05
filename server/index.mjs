@@ -197,6 +197,10 @@ async function callLLM(config, messages, signal, verbose) {
       const err = await response.json();
       detail = err.error?.message || err.message || err.msg || JSON.stringify(err);
     } catch { /* ignore */ }
+    // Give a helpful hint for 401 errors
+    if (response.status === 401 && !detail) {
+      detail = "Unauthorized — check your API key";
+    }
     throw new Error(`LLM API ${response.status}: ${detail}`);
   }
 
@@ -593,8 +597,19 @@ async function main() {
     process.exit(1);
   }
 
-  if (!config.llm?.api_key) {
-    console.error("[claro] ERROR: No API key configured.");
+  // Resolve the API key (supports $ENV_VAR notation)
+  const resolvedKey = resolveApiKey(config.llm?.api_key);
+  if (!resolvedKey) {
+    const rawKey = config.llm?.api_key || "(not set)";
+    console.error("[claro] ERROR: No valid API key configured.");
+    if (rawKey.startsWith("$")) {
+      console.error(`[claro] The config references env var ${rawKey} but it is not set.`);
+      console.error(`[claro] Set it in your shell: export ${rawKey}=your-api-key-here`);
+    } else if (rawKey === "(not set)") {
+      console.error(`[claro] Set CLARO_API_KEY in your environment or edit ${CONFIG_PATH}.`);
+    } else {
+      console.error(`[claro] The configured API key appears to be invalid. Edit ${CONFIG_PATH}.`);
+    }
     process.exit(1);
   }
 
